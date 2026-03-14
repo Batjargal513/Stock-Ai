@@ -1,0 +1,8 @@
+KC_low
+KC_high
+BB_mid
+VWAP
+Ichimoku_b
+Returns_10d
+BB_width
+RSI_fast
