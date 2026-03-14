@@ -13,7 +13,71 @@ import plotly.graph_objects as go
 import plotly.express as px
 from plotly.subplots import make_subplots
 import yfinance as yf
+import requests
 from datetime import datetime, timedelta
+
+# ── Patch yfinance to use browser-like headers ───────────────
+# Render and many cloud providers get blocked by Yahoo Finance
+# without proper User-Agent headers
+_YF_HEADERS = {
+    "User-Agent": (
+        "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
+        "AppleWebKit/537.36 (KHTML, like Gecko) "
+        "Chrome/120.0.0.0 Safari/537.36"
+    ),
+    "Accept": "text/html,application/xhtml+xml,application/xml;q=0.9,*/*;q=0.8",
+    "Accept-Language": "en-US,en;q=0.5",
+    "Accept-Encoding": "gzip, deflate, br",
+    "Connection": "keep-alive",
+}
+yf.utils.user_agent_headers = _YF_HEADERS
+
+
+def yf_history(ticker: str, period: str = "1y", interval: str = "1d") -> pd.DataFrame:
+    """
+    Reliable yfinance wrapper that works on Render and other cloud servers.
+    Falls back to direct Yahoo Finance API call if yfinance fails.
+    """
+    # Try yfinance first
+    try:
+        t = yf.Ticker(ticker)
+        t._session = requests.Session()
+        t._session.headers.update(_YF_HEADERS)
+        df = t.history(period=period, interval=interval, auto_adjust=True)
+        if not df.empty:
+            df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
+            return df
+    except Exception:
+        pass
+
+    # Fallback: direct Yahoo Finance API call
+    try:
+        period_map = {"1d": 1, "5d": 5, "1mo": 30, "3mo": 90,
+                      "6mo": 180, "1y": 365, "2y": 730, "5y": 1825, "10y": 3650}
+        days = period_map.get(period, 365)
+        end_ts = int(datetime.now().timestamp())
+        start_ts = int((datetime.now() - timedelta(days=days)).timestamp())
+        url = (
+            f"https://query1.finance.yahoo.com/v8/finance/chart/{ticker}"
+            f"?interval={interval}&period1={start_ts}&period2={end_ts}"
+        )
+        resp = requests.get(url, headers=_YF_HEADERS, timeout=15)
+        data = resp.json()["chart"]["result"][0]
+        ts = data["timestamp"]
+        q  = data["indicators"]["quote"][0]
+        adj = data["indicators"].get("adjclose", [{}])[0].get("adjclose", q["close"])
+        df = pd.DataFrame({
+            "Open":   q["open"],
+            "High":   q["high"],
+            "Low":    q["low"],
+            "Close":  adj,
+            "Volume": q["volume"],
+        }, index=pd.to_datetime(ts, unit="s"))
+        df.index.name = "Date"
+        df.dropna(inplace=True)
+        return df
+    except Exception as e:
+        return pd.DataFrame()
 
 from config import TICKERS, MODELS_DIR, ANTHROPIC_API_KEY
 from data_collector import download_data
@@ -137,10 +201,12 @@ div[data-testid="stTextInput"] > div > div {
 @st.cache_data(ttl=300)
 def get_live_price_data(ticker: str) -> dict:
     try:
+        hist = yf_history(ticker, period="5d", interval="1d")
         t = yf.Ticker(ticker)
-        info = t.fast_info
-
-        hist = t.history(period="5d", interval="1d", auto_adjust=True)
+        try:
+            info = t.fast_info
+        except Exception:
+            info = None
         if len(hist) >= 2:
             prev_close = float(hist["Close"].iloc[-2])
             curr_close = float(hist["Close"].iloc[-1])
@@ -153,23 +219,26 @@ def get_live_price_data(ticker: str) -> dict:
 
         # Safely get each field — fast_info can throw on some environments
         try:
-            volume = f"{int(info.three_month_average_volume):,}"
+            volume = f"{int(info.three_month_average_volume):,}" if info else "N/A"
         except Exception:
             vol = int(hist["Volume"].iloc[-1]) if len(hist) > 0 else 0
             volume = f"{vol:,}" if vol else "N/A"
 
         try:
-            week_52_high = round(float(info.year_high), 2)
+            week_52_high = round(float(info.year_high), 2) if info else 0.0
         except Exception:
-            week_52_high = round(float(hist["High"].max()), 2) if len(hist) > 0 else 0.0
+            # Use 1y history for 52W high
+            hist_1y = yf_history(ticker, period="1y")
+            week_52_high = round(float(hist_1y["High"].max()), 2) if not hist_1y.empty else 0.0
 
         try:
-            week_52_low = round(float(info.year_low), 2)
+            week_52_low = round(float(info.year_low), 2) if info else 0.0
         except Exception:
-            week_52_low = round(float(hist["Low"].min()), 2) if len(hist) > 0 else 0.0
+            hist_1y = yf_history(ticker, period="1y")
+            week_52_low = round(float(hist_1y["Low"].min()), 2) if not hist_1y.empty else 0.0
 
         try:
-            market_cap = f"${info.market_cap/1e9:.1f}B" if info.market_cap else "N/A"
+            market_cap = f"${info.market_cap/1e9:.1f}B" if (info and info.market_cap) else "N/A"
         except Exception:
             market_cap = "N/A"
 
@@ -192,13 +261,8 @@ def get_live_price_data(ticker: str) -> dict:
 @st.cache_data(ttl=600)
 def load_chart_data(ticker: str, period: str = "1y") -> pd.DataFrame:
     # Use .history() — more reliable on server environments than yf.download()
-    try:
-        df = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
-        if df.empty:
-            raise ValueError("No data returned")
-        return df
-    except Exception:
-        return pd.DataFrame()
+    df = yf_history(ticker, period=period, interval="1d")
+    return df
 
 
 @st.cache_data(ttl=3600)
@@ -207,12 +271,10 @@ def fetch_ticker_history(ticker: str) -> pd.DataFrame:
     Download 10 years of daily data for one ticker using .history()
     which works reliably on Render / server environments.
     """
-    df = yf.Ticker(ticker).history(period="10y", interval="1d", auto_adjust=True)
+    df = yf_history(ticker, period="10y", interval="1d")
     if df.empty:
         raise RuntimeError(f"No data returned for {ticker}")
-    # Standardise columns to match what indicators.py expects
     df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
-    df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
     df["Ticker"] = ticker
     return df
 
