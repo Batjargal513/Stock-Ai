@@ -31,7 +31,7 @@ COPY .streamlit/config.toml .streamlit/config.toml
 EXPOSE 8501
 
 # Health check
-HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
+#HEALTHCHECK CMD curl --fail http://localhost:8501/_stcore/health || exit 1
 
 # Run the app
 CMD ["streamlit", "run", "app.py", \
