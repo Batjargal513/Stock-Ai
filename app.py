@@ -155,7 +155,8 @@ def get_live_price_data(ticker: str) -> dict:
         try:
             volume = f"{int(info.three_month_average_volume):,}"
         except Exception:
-            volume = f"{int(hist["Volume"].iloc[-1]):,}" if len(hist) > 0 else "N/A"
+            vol = int(hist["Volume"].iloc[-1]) if len(hist) > 0 else 0
+            volume = f"{vol:,}" if vol else "N/A"
 
         try:
             week_52_high = round(float(info.year_high), 2)
