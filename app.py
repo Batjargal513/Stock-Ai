@@ -136,26 +136,56 @@ div[data-testid="stTextInput"] > div > div {
 
 @st.cache_data(ttl=300)
 def get_live_price_data(ticker: str) -> dict:
-    info = yf.Ticker(ticker).fast_info
-    hist = yf.download(ticker, period="2d", interval="1d",
-                       auto_adjust=True, progress=False)
-    hist.columns = hist.columns.get_level_values(0) if isinstance(
-        hist.columns, pd.MultiIndex
-    ) else hist.columns
-    if len(hist) >= 2:
-        prev_close = float(hist["Close"].iloc[-2])
-        curr_close = float(hist["Close"].iloc[-1])
-        change_pct = round((curr_close - prev_close) / prev_close * 100, 2)
-    else:
-        curr_close = change_pct = 0
-    return {
-        "price":         round(curr_close, 2),
-        "change_pct":    change_pct,
-        "volume":        f"{int(info.three_month_average_volume):,}",
-        "week_52_high":  round(float(info.year_high), 2),
-        "week_52_low":   round(float(info.year_low), 2),
-        "market_cap":    f"${info.market_cap/1e9:.1f}B" if info.market_cap else "N/A",
-    }
+    try:
+        t = yf.Ticker(ticker)
+        info = t.fast_info
+
+        hist = t.history(period="5d", interval="1d", auto_adjust=True)
+        if len(hist) >= 2:
+            prev_close = float(hist["Close"].iloc[-2])
+            curr_close = float(hist["Close"].iloc[-1])
+            change_pct = round((curr_close - prev_close) / prev_close * 100, 2)
+        elif len(hist) == 1:
+            curr_close = float(hist["Close"].iloc[-1])
+            change_pct = 0.0
+        else:
+            curr_close = change_pct = 0.0
+
+        # Safely get each field — fast_info can throw on some environments
+        try:
+            volume = f"{int(info.three_month_average_volume):,}"
+        except Exception:
+            volume = f"{int(hist["Volume"].iloc[-1]):,}" if len(hist) > 0 else "N/A"
+
+        try:
+            week_52_high = round(float(info.year_high), 2)
+        except Exception:
+            week_52_high = round(float(hist["High"].max()), 2) if len(hist) > 0 else 0.0
+
+        try:
+            week_52_low = round(float(info.year_low), 2)
+        except Exception:
+            week_52_low = round(float(hist["Low"].min()), 2) if len(hist) > 0 else 0.0
+
+        try:
+            market_cap = f"${info.market_cap/1e9:.1f}B" if info.market_cap else "N/A"
+        except Exception:
+            market_cap = "N/A"
+
+        return {
+            "price":        round(curr_close, 2),
+            "change_pct":   change_pct,
+            "volume":       volume,
+            "week_52_high": week_52_high,
+            "week_52_low":  week_52_low,
+            "market_cap":   market_cap,
+        }
+    except Exception as e:
+        return {
+            "price": 0.0, "change_pct": 0.0,
+            "volume": "N/A", "week_52_high": 0.0,
+            "week_52_low": 0.0, "market_cap": "N/A",
+        }
 
 
 @st.cache_data(ttl=600)
