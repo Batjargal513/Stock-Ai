@@ -25,7 +25,7 @@ RUN mkdir -p data models logs
 
 # Streamlit config
 RUN mkdir -p .streamlit
-COPY .streamlit/config.toml .streamlit/config.toml
+#COPY .streamlit/config.toml .streamlit/config.toml
 
 # Expose port
 EXPOSE 8501
