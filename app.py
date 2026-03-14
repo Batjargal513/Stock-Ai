@@ -191,20 +191,38 @@ def get_live_price_data(ticker: str) -> dict:
 
 @st.cache_data(ttl=600)
 def load_chart_data(ticker: str, period: str = "1y") -> pd.DataFrame:
-    df = yf.download(ticker, period=period, interval="1d",
-                     auto_adjust=True, progress=False)
-    df.columns = df.columns.get_level_values(0) if isinstance(
-        df.columns, pd.MultiIndex
-    ) else df.columns
+    # Use .history() — more reliable on server environments than yf.download()
+    try:
+        df = yf.Ticker(ticker).history(period=period, interval="1d", auto_adjust=True)
+        if df.empty:
+            raise ValueError("No data returned")
+        return df
+    except Exception:
+        return pd.DataFrame()
+
+
+@st.cache_data(ttl=3600)
+def fetch_ticker_history(ticker: str) -> pd.DataFrame:
+    """
+    Download 10 years of daily data for one ticker using .history()
+    which works reliably on Render / server environments.
+    """
+    df = yf.Ticker(ticker).history(period="10y", interval="1d", auto_adjust=True)
+    if df.empty:
+        raise RuntimeError(f"No data returned for {ticker}")
+    # Standardise columns to match what indicators.py expects
+    df = df[["Open", "High", "Low", "Close", "Volume"]].copy()
+    df.index = df.index.tz_localize(None) if df.index.tzinfo else df.index
+    df["Ticker"] = ticker
     return df
 
 
 @st.cache_data(ttl=3600)
 def get_prediction_cached(ticker: str):
-    """Load data, compute features, and run ML prediction."""
+    """Fetch data, compute features, and run ML prediction."""
     try:
         from ml_pipeline import predict
-        raw = download_data(tickers=[ticker], force_refresh=False)
+        raw = fetch_ticker_history(ticker)
         feat = add_all_indicators(raw)
         ticker_df = feat[feat["Ticker"] == ticker]
         return predict(ticker_df)
